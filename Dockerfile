@@ -1,58 +1,53 @@
-# Use Python 3.11 slim image for better compatibility
+# syntax=docker/dockerfile:1
+
+# Use Python 3.11 slim image
 FROM python:3.11-slim
 
 # Set working directory
-WORKDIR /app
+WORKDIR /usr/src/app
 
-# Install system dependencies for PDF and document processing
-RUN apt-get update && apt-get install -y \
+# Install system dependencies needed by common Python packages
+# (psycopg2, cryptography, uvloop/httptools, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     gcc \
     g++ \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    git \
+    libpq-dev \
+    libffi-dev \
+    libssl-dev \
+    pkg-config \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Upgrade pip and install Python dependencies
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Upgrade packaging tooling and install deps
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy app code
 COPY . .
 
-# Create necessary directories
+# Create necessary directories (won't fail if they already exist)
 RUN mkdir -p knowledge_base chroma_db static templates
 
-# Set environment variables with defaults
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
+# Environment setup
+ENV PYTHONPATH=/usr/src/app \
+    PYTHONUNBUFFERED=1
 
-# Build the vector database if knowledge base files exist
-# This will use the GOOGLE_API_KEY_1 provided during the build process
-ARG GOOGLE_API_KEY_1
-ARG GOOGLE_API_KEY_2
-ARG GOOGLE_API_KEY_3
-ARG GOOGLE_API_KEY_4
-ARG GOOGLE_API_KEY_5
-ARG SECRET_KEY
+# Add entrypoint for runtime DB build
+COPY entrypoint.sh /usr/src/app/
+RUN chmod +x /usr/src/app/entrypoint.sh
 
-ENV GOOGLE_API_KEY_1=$GOOGLE_API_KEY_1
-ENV GOOGLE_API_KEY_2=$GOOGLE_API_KEY_2
-ENV GOOGLE_API_KEY_3=$GOOGLE_API_KEY_3
-ENV GOOGLE_API_KEY_4=$GOOGLE_API_KEY_4
-ENV GOOGLE_API_KEY_5=$GOOGLE_API_KEY_5
-ENV SECRET_KEY=$SECRET_KEY
+# Expose the port you will actually serve on (keep consistent everywhere)
+EXPOSE 80
 
-# Only build DB if knowledge base files exist
-RUN if [ -n "$(ls -A knowledge_base/ 2>/dev/null)" ]; then python build_db.py; fi
+# Healthcheck must probe the *same* port as the app
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD curl -fsS http://localhost:80/api/health || exit 1
 
-# Expose port 8000 for FastAPI
-EXPOSE 8000
-
-# Health check for FastAPI - updated endpoint
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
-
-# Run multi-org FastAPI application with uvicorn
-CMD ["uvicorn", "run:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run app (goes through entrypoint.sh first)
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["uvicorn", "run:app", "--host", "0.0.0.0", "--port", "80"]
